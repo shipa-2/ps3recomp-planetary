@@ -54,6 +54,11 @@ endif()
 # to a stub wherever the shader tools are absent, so it is part of the
 # library everywhere. See the "Guest shaders on Metal" section below.
 list(APPEND HLE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/libs/video/rsx_shader_msl.cpp")
+# Same story for the HLSL -> SPIR-V translator the Plume/Vulkan backend uses
+# (see the "Guest shaders on Vulkan/Plume" section below): glslang only, no
+# spirv-cross, so it is a separate compilation unit rather than sharing
+# rsx_shader_msl.cpp's dual-dependency guard.
+list(APPEND HLE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/libs/video/rsx_shader_spirv.cpp")
 
 # Runtime core (syscalls, PPU, SPU, memory)
 file(GLOB_RECURSE RUNTIME_SOURCES
@@ -231,6 +236,86 @@ if(UNIX)
         message(STATUS "  Shaders:      guest programs translated to MSL (glslang ${glslang_VERSION}, ${SPVC_LIBS})")
     else()
         message(STATUS "  Shaders:      glslang/spirv-cross not found; Metal backend stays fixed-function")
+    endif()
+
+    # -----------------------------------------------------------------------
+    # Guest shaders on Vulkan/Plume: HLSL -> SPIR-V
+    # -----------------------------------------------------------------------
+    # rsx_shader_spirv.cpp needs only glslang (not spirv-cross), so it is
+    # enabled independently of PS3RECOMP_MSL_TRANSLATION above -- a machine
+    # with glslang but not spirv-cross still gets a working Plume backend.
+    if(glslang_FOUND AND TARGET glslang::glslang AND TARGET glslang::SPIRV)
+        add_library(ps3recomp_spirv_translation INTERFACE)
+        target_compile_definitions(ps3recomp_spirv_translation INTERFACE
+            PS3RECOMP_HAVE_SPIRV_TRANSLATION=1)
+        target_link_libraries(ps3recomp_spirv_translation INTERFACE
+            glslang::glslang glslang::SPIRV)
+        if(TARGET glslang::glslang-default-resource-limits)
+            target_link_libraries(ps3recomp_spirv_translation INTERFACE
+                glslang::glslang-default-resource-limits)
+        endif()
+        target_link_libraries(ps3recomp_runtime PRIVATE ps3recomp_spirv_translation)
+        set(PS3RECOMP_SPIRV_TRANSLATION ON)
+        message(STATUS "  Shaders:      guest programs translatable to SPIR-V (glslang ${glslang_VERSION})")
+    else()
+        set(PS3RECOMP_SPIRV_TRANSLATION OFF)
+        message(STATUS "  Shaders:      glslang not found; HLSL -> SPIR-V translation stubbed")
+    endif()
+endif()
+
+# ---------------------------------------------------------------------------
+# RSX Vulkan backend on Plume (Linux, and wherever else Plume reaches)
+# ---------------------------------------------------------------------------
+# See docs/RENDERER_MIGRATION.md: this is the cross-platform rsx_draw_backend
+# implementation meant to retire the Windows-only D3D12 "live" path and the
+# separate Metal decompiler over time, not a bolt-on beside them. It builds
+# whenever a Plume checkout is found beside this repository (the same
+# sibling-directory convention Xerenge's own rexgpu-plume uses) -- clone one
+# with: git clone https://github.com/renderbag/plume ../plume
+option(PS3RECOMP_RSX_BACKEND_PLUME "Build the Plume/Vulkan RSX draw backend" ${UNIX})
+if(PS3RECOMP_RSX_BACKEND_PLUME AND NOT APPLE)
+    set(PLUME_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../plume")
+    find_package(SDL2 QUIET)
+    if(EXISTS "${PLUME_ROOT}/CMakeLists.txt" AND (SDL2_FOUND OR TARGET SDL2::SDL2))
+        set(PLUME_SDL_VULKAN_ENABLED ON CACHE BOOL "" FORCE)
+        set(PLUME_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+        add_subdirectory("${PLUME_ROOT}" "${CMAKE_CURRENT_BINARY_DIR}/plume")
+
+        add_library(ps3recomp_rsx_plume STATIC
+            "${CMAKE_CURRENT_SOURCE_DIR}/libs/video/plume_renderer/rsx_draw_backend_plume.cpp"
+        )
+        target_include_directories(ps3recomp_rsx_plume PUBLIC
+            "${CMAKE_CURRENT_SOURCE_DIR}/libs/video"
+            "${CMAKE_CURRENT_SOURCE_DIR}/include"
+            "${PLUME_ROOT}"
+        )
+        target_link_libraries(ps3recomp_rsx_plume PUBLIC plume)
+        if(TARGET SDL2::SDL2)
+            target_link_libraries(ps3recomp_rsx_plume PUBLIC SDL2::SDL2)
+        else()
+            target_include_directories(ps3recomp_rsx_plume PUBLIC ${SDL2_INCLUDE_DIRS})
+            target_link_libraries(ps3recomp_rsx_plume PUBLIC ${SDL2_LIBRARIES})
+        endif()
+        target_link_libraries(ps3recomp_runtime PUBLIC ps3recomp_rsx_plume)
+        message(STATUS "  RSX backend:  Plume/Vulkan enabled (${PLUME_ROOT})")
+
+        # Phase 1 smoke test: real window + device + swapchain + clear +
+        # present, no pipelines/textures/draws yet. See
+        # libs/video/tests/test_plume_backend_smoke.c and
+        # docs/RENDERER_MIGRATION.md.
+        add_executable(ps3recomp_plume_smoke
+            "${CMAKE_CURRENT_SOURCE_DIR}/libs/video/tests/test_plume_backend_smoke.c"
+        )
+        target_link_libraries(ps3recomp_plume_smoke PRIVATE ps3recomp_rsx_plume)
+        message(STATUS "  RSX backend:  ps3recomp_plume_smoke target added")
+    else()
+        if(NOT EXISTS "${PLUME_ROOT}/CMakeLists.txt")
+            message(STATUS "  RSX backend:  Plume not found at ${PLUME_ROOT}; "
+                          "clone it beside this repo to enable (git clone "
+                          "https://github.com/renderbag/plume ../plume)")
+        else()
+            message(STATUS "  RSX backend:  SDL2 not found; Plume backend disabled")
+        endif()
     endif()
 endif()
 
