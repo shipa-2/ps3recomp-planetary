@@ -102,7 +102,8 @@ public:
 
 private:
     void EnsureListOpen();
-    void EnsureListClosedAndSubmitted();
+    void EnsureListClosedAndSubmitted(RenderCommandSemaphore* wait_sem = nullptr,
+                                      RenderCommandSemaphore* signal_sem = nullptr);
     Surface* FindSurface(uint32_t id);
 
     SDL_Window* window_ = nullptr;
@@ -204,14 +205,25 @@ void PlumeRsxBackend::EnsureListOpen()
     }
 }
 
-void PlumeRsxBackend::EnsureListClosedAndSubmitted()
+void PlumeRsxBackend::EnsureListClosedAndSubmitted(RenderCommandSemaphore* wait_sem,
+                                                   RenderCommandSemaphore* signal_sem)
 {
     if (!list_open_) return;
     list_->end();
     list_open_ = false;
 
     const RenderCommandList* cmd_list = list_.get();
-    queue_->executeCommandLists(&cmd_list, 1, nullptr, 0, nullptr, 0, fence_.get());
+    /* Present()'s bug (fixed here): submitting with no signal semaphore
+     * while swap_chain_->present() is later told to wait on one that
+     * nothing ever signals is a permanent GPU-side wait -- confirmed via a
+     * backtrace stuck in VulkanSwapChain::present()'s syncobj wait. Whoever
+     * calls this with real semaphores is responsible for keeping them alive
+     * until the GPU work they guard has completed (Present() already does,
+     * via waitForCommandFence below). */
+    queue_->executeCommandLists(&cmd_list, 1,
+                                wait_sem ? &wait_sem : nullptr, wait_sem ? 1 : 0,
+                                signal_sem ? &signal_sem : nullptr, signal_sem ? 1 : 0,
+                                fence_.get());
     queue_->waitForCommandFence(fence_.get());
 }
 
@@ -317,12 +329,18 @@ void PlumeRsxBackend::Present(uint32_t surface)
     list_->barriers(RenderBarrierStage::NONE,
                     RenderTextureBarrier(swap_texture, RenderTextureLayout::PRESENT));
 
-    EnsureListClosedAndSubmitted();
-
     while (release_sems_.size() < swap_chain_->getTextureCount()) {
         release_sems_.emplace_back(device_->createCommandSemaphore());
     }
     RenderCommandSemaphore* signal_sem = release_sems_[image_index].get();
+
+    /* Wait on acquire_sem_ (the swapchain image isn't necessarily ready the
+     * instant acquireTexture() returns an index) and signal signal_sem so
+     * that the present() call below -- which waits on it -- actually has
+     * something to wait for. Without both of these this deadlocks inside
+     * the driver: see EnsureListClosedAndSubmitted()'s comment. */
+    EnsureListClosedAndSubmitted(acquire_sem_.get(), signal_sem);
+
     swap_chain_->present(image_index, &signal_sem, 1);
 }
 
