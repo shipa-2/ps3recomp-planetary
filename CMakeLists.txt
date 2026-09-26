@@ -271,38 +271,46 @@ endif()
 # separate Metal decompiler over time, not a bolt-on beside them. It builds
 # whenever a Plume checkout is found beside this repository (the same
 # sibling-directory convention Xerenge's own rexgpu-plume uses) -- clone one
-# with: git clone https://github.com/renderbag/plume ../plume
+# with: git clone https://github.com/shipa-2/plume ../plume
+# (that fork, not upstream renderbag/plume: this backend is written against
+# SDL3, and upstream was still SDL2-only when it was written -- see the NOTE
+# a few lines down.)
 option(PS3RECOMP_RSX_BACKEND_PLUME "Build the Plume/Vulkan RSX draw backend" ${UNIX})
 if(PS3RECOMP_RSX_BACKEND_PLUME AND NOT APPLE)
     set(PLUME_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../plume")
-    find_package(SDL2 QUIET)
-    if(EXISTS "${PLUME_ROOT}/CMakeLists.txt" AND (SDL2_FOUND OR TARGET SDL2::SDL2))
-        # Some distros resolve Plume's bare #include <SDL_vulkan.h>/<SDL.h>
-        # to an installed SDL3's copy instead of SDL2's -- notably Arch,
-        # where sdl2-compat (the SDL2 ABI implemented on top of SDL3)
-        # coexists with a separately installed sdl3 package, and whatever
-        # path Plume's own CMakeLists resolves SDL2's include dir through
-        # (its SDL2::SDL2 target property, or a pkg-config fallback) ends up
-        # searching SDL3's directory first. SDL_bool, SDL_ScaleMode and
-        # SDL_CreateWindow's argument count all differ between the two
-        # majors, so the result is a wall of redefinition errors, not a
-        # clean failure. Overriding SDL2::SDL2's own property is not enough
-        # if Plume did not resolve its include dir through that target in
-        # the first place, so this instead force-prepends (BEFORE) the real
-        # SDL2 directory onto the `plume` target itself once it exists,
-        # which wins the search order regardless of how Plume found SDL2.
-        find_path(PS3RECOMP_SDL2_STRICT_INCLUDE_DIR NAMES SDL_vulkan.h
-            PATH_SUFFIXES SDL2
-            PATHS /usr/include /usr/local/include /opt/homebrew/include)
-
+    if(EXISTS "${PLUME_ROOT}/CMakeLists.txt")
+        # NOTE: this project's Plume checkout (see PLUME_ROOT above) needs to
+        # be one whose CMakeLists.txt links against SDL3 (find_package(SDL3)
+        # / a PLUME_SDL3_TARGET, not SDL2) -- e.g. shipa-2/plume, not
+        # upstream renderbag/plume at the time this backend was written,
+        # which was still SDL2-only. rsx_draw_backend_plume.cpp is written
+        # against the SDL3 API (SDL3/SDL.h, 4-argument SDL_CreateWindow,
+        # SDL_EVENT_QUIT, bool-returning SDL_Init/SDL_PollEvent) to match.
+        # Do NOT link SDL2 into this backend's own translation unit: mixing
+        # SDL2 and SDL3 headers there is an ODR pileup (SDL_bool,
+        # SDL_ScaleMode, SDL_CreateWindow's own argument count all differ
+        # between the two), not something an include-path or link order fix
+        # can paper over.
+        #
+        # Nor can ps3recomp_rsx_plume (SDL3) be linked into the SAME final
+        # binary as ps3recomp_runtime's own SDL2 usage (cellPad/cellAudio):
+        # CMake's own IMPORTED targets carry a COMPATIBLE_INTERFACE_STRING
+        # SDL_VERSION property, and having both SDL2::SDL2 and an SDL3
+        # target as transitive dependencies of one target is a hard CMake
+        # generate-time error ("does not agree with the value of SDL_VERSION
+        # already determined"), not just an ODR risk. This is exactly why
+        # Xerenge's own Plume backend (rexgpu-plume) is a separate SHARED
+        # library loaded as a plugin rather than statically linked into the
+        # host executable -- its own comments say as much ("volk is confined
+        # to this shared library so it cannot conflict"). Until this
+        # backend gets the same plugin treatment (see docs/RENDERER_MIGRATION.md),
+        # ps3recomp_rsx_plume is therefore its own standalone target: do NOT
+        # link it into ps3recomp_runtime. A game that wants both cellPad/
+        # cellAudio and this Plume/Vulkan backend in one process needs the
+        # plugin split first.
         set(PLUME_SDL_VULKAN_ENABLED ON CACHE BOOL "" FORCE)
         set(PLUME_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
         add_subdirectory("${PLUME_ROOT}" "${CMAKE_CURRENT_BINARY_DIR}/plume")
-
-        if(PS3RECOMP_SDL2_STRICT_INCLUDE_DIR AND TARGET plume)
-            target_include_directories(plume BEFORE PUBLIC "${PS3RECOMP_SDL2_STRICT_INCLUDE_DIR}")
-            message(STATUS "  SDL2:         pinned plume's include search order to ${PS3RECOMP_SDL2_STRICT_INCLUDE_DIR} first (avoids SDL3 header collisions)")
-        endif()
 
         add_library(ps3recomp_rsx_plume STATIC
             "${CMAKE_CURRENT_SOURCE_DIR}/libs/video/plume_renderer/rsx_draw_backend_plume.cpp"
@@ -312,22 +320,10 @@ if(PS3RECOMP_RSX_BACKEND_PLUME AND NOT APPLE)
             "${CMAKE_CURRENT_SOURCE_DIR}/include"
             "${PLUME_ROOT}"
         )
+        # SDL3's own include dirs/libs come in transitively: `plume` links
+        # its SDL3 target PUBLIC.
         target_link_libraries(ps3recomp_rsx_plume PUBLIC plume)
-        if(TARGET SDL2::SDL2)
-            target_link_libraries(ps3recomp_rsx_plume PUBLIC SDL2::SDL2)
-        else()
-            target_include_directories(ps3recomp_rsx_plume PUBLIC ${SDL2_INCLUDE_DIRS})
-            target_link_libraries(ps3recomp_rsx_plume PUBLIC ${SDL2_LIBRARIES})
-        endif()
-        if(PS3RECOMP_SDL2_STRICT_INCLUDE_DIR)
-            # Same reasoning as the `plume` target above: this file's own
-            # #include <SDL.h> resolves fine on its own, but linking `plume`
-            # PUBLIC can still pull in whatever (possibly SDL3-first) search
-            # order Plume resolved internally, so pin it here too.
-            target_include_directories(ps3recomp_rsx_plume BEFORE PUBLIC "${PS3RECOMP_SDL2_STRICT_INCLUDE_DIR}")
-        endif()
-        target_link_libraries(ps3recomp_runtime PUBLIC ps3recomp_rsx_plume)
-        message(STATUS "  RSX backend:  Plume/Vulkan enabled (${PLUME_ROOT})")
+        message(STATUS "  RSX backend:  Plume/Vulkan enabled as its own target, ps3recomp_rsx_plume (${PLUME_ROOT}) -- NOT linked into ps3recomp_runtime, see the NOTE above")
 
         # Phase 1 smoke test: real window + device + swapchain + clear +
         # present, no pipelines/textures/draws yet. See
@@ -339,13 +335,12 @@ if(PS3RECOMP_RSX_BACKEND_PLUME AND NOT APPLE)
         target_link_libraries(ps3recomp_plume_smoke PRIVATE ps3recomp_rsx_plume)
         message(STATUS "  RSX backend:  ps3recomp_plume_smoke target added")
     else()
-        if(NOT EXISTS "${PLUME_ROOT}/CMakeLists.txt")
-            message(STATUS "  RSX backend:  Plume not found at ${PLUME_ROOT}; "
-                          "clone it beside this repo to enable (git clone "
-                          "https://github.com/renderbag/plume ../plume)")
-        else()
-            message(STATUS "  RSX backend:  SDL2 not found; Plume backend disabled")
-        endif()
+        message(STATUS "  RSX backend:  Plume not found at ${PLUME_ROOT}; "
+                      "clone an SDL3-linked Plume beside this repo to enable "
+                      "(git clone https://github.com/shipa-2/plume ../plume; "
+                      "upstream renderbag/plume was SDL2-only when this "
+                      "backend was written against SDL3 -- see the NOTE "
+                      "above)")
     endif()
 endif()
 

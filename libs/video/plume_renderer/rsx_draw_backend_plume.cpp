@@ -3,7 +3,7 @@
  *
  * See the header for scope. This file follows the same shape Xerenge's own
  * rexgpu-plume backend uses for its Xenos target (plume_swapchain.cpp /
- * plume_graphics_system.cpp): an SDL2 window, plume::CreateVulkanInterface,
+ * plume_graphics_system.cpp): an SDL window, plume::CreateVulkanInterface,
  * one RenderDevice/RenderCommandQueue/RenderCommandList/RenderCommandFence,
  * and offscreen RenderTexture(s) that get copied into the swapchain image at
  * present time rather than being rendered into the swapchain image
@@ -11,12 +11,21 @@
  * surfaces (a title can hold more than one cellGcm display buffer alive at
  * once) both just work, with the swapchain only ever seeing the one surface
  * a flip actually presents.
+ *
+ * Written against SDL3 (SDL_Init/SDL_PollEvent return bool, SDL_CreateWindow
+ * takes no x/y, the quit event is SDL_EVENT_QUIT) to match the Plume
+ * checkout this project builds against (see CMakeLists.txt's PLUME_ROOT
+ * comment: shipa-2/plume, which links SDL3 unconditionally). Do not include
+ * <SDL.h>/SDL2 headers anywhere in this file: plume_render_interface_types.h
+ * already pulls in <SDL3/SDL_vulkan.h>, and mixing SDL2 and SDL3 headers in
+ * one translation unit is an ODR pileup (SDL_bool, SDL_ScaleMode, etc.),
+ * not something fixable by include order.
  */
 #include "rsx_draw_backend_plume.h"
 
 #include <plume_render_interface.h>
 
-#include <SDL.h>
+#include <SDL3/SDL.h>
 
 #include <cstdio>
 #include <memory>
@@ -24,11 +33,10 @@
 #include <vector>
 
 namespace plume {
-#if PLUME_SDL_VULKAN_ENABLED
-extern std::unique_ptr<RenderInterface> CreateVulkanInterface(RenderWindow sdlWindow);
-#else
+// This Plume checkout's CreateVulkanInterface() is always niladic: the
+// window is not needed until swapchain creation (RenderSwapChainDesc takes
+// it there instead). See plume_vulkan.cpp's single definition.
 extern std::unique_ptr<RenderInterface> CreateVulkanInterface();
-#endif
 } // namespace plume
 
 namespace {
@@ -123,30 +131,23 @@ Surface* PlumeRsxBackend::FindSurface(uint32_t id)
 
 int PlumeRsxBackend::Init(uint32_t width, uint32_t height, const char* title)
 {
-    if (SDL_WasInit(SDL_INIT_VIDEO) == 0) {
-        if (SDL_Init(SDL_INIT_VIDEO) != 0) {
-            std::fprintf(stderr, "[plume backend] SDL_Init failed: %s\n", SDL_GetError());
-            return -1;
-        }
+    /* SDL3's SDL_Init is additive/ref-counted, so calling it unconditionally
+     * (unlike SDL2's own SDL_WasInit-guarded pattern) is safe even if the
+     * host process already initialised SDL_INIT_VIDEO itself. */
+    if (!SDL_Init(SDL_INIT_VIDEO)) {
+        std::fprintf(stderr, "[plume backend] SDL_Init failed: %s\n", SDL_GetError());
+        return -1;
     }
 
-    uint32_t sdl_flags = SDL_WINDOW_RESIZABLE;
-#if PLUME_SDL_VULKAN_ENABLED
-    sdl_flags |= SDL_WINDOW_VULKAN;
-#endif
-    window_ = SDL_CreateWindow(title ? title : "ps3recomp",
-                               SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                               (int)width, (int)height, sdl_flags);
+    const uint32_t sdl_flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_VULKAN;
+    window_ = SDL_CreateWindow(title ? title : "ps3recomp", (int)width, (int)height, sdl_flags);
     if (!window_) {
         std::fprintf(stderr, "[plume backend] SDL_CreateWindow failed: %s\n", SDL_GetError());
         return -1;
     }
+    SDL_SetWindowPosition(window_, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
 
-#if PLUME_SDL_VULKAN_ENABLED
-    interface_ = plume::CreateVulkanInterface(window_);
-#else
     interface_ = plume::CreateVulkanInterface();
-#endif
     if (!interface_) {
         std::fprintf(stderr, "[plume backend] CreateVulkanInterface failed\n");
         return -1;
@@ -163,15 +164,7 @@ int PlumeRsxBackend::Init(uint32_t width, uint32_t height, const char* title)
     list_ = queue_->createCommandList();
     acquire_sem_ = device_->createCommandSemaphore();
 
-#if PLUME_SDL_VULKAN_ENABLED
     RenderWindow render_window = window_;
-#else
-    /* Non-SDL-Vulkan builds need the platform-native window handle; Phase 1
-     * only targets the PLUME_SDL_VULKAN_ENABLED path (Linux CI configures it
-     * on, matching Xerenge's own rexgpu-plume build), so this is left as a
-     * clearly-marked gap rather than guessed at. */
-    #error "rsx_draw_backend_plume requires PLUME_SDL_VULKAN_ENABLED"
-#endif
     swap_chain_ = queue_->createSwapChain(RenderSwapChainDesc(render_window, kSwapchainFormat, kSwapchainImageCount));
     if (!swap_chain_ || !swap_chain_->resize()) {
         std::fprintf(stderr, "[plume backend] swap chain creation/resize failed\n");
@@ -346,7 +339,7 @@ int PlumeRsxBackend::PumpEvents()
 {
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
-        if (event.type == SDL_QUIT) return 0;
+        if (event.type == SDL_EVENT_QUIT) return 0;
     }
     return 1;
 }
