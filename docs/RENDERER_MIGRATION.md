@@ -120,17 +120,28 @@ not to running/watching a frame get presented:
   real CMake linking constraint -- was found. If a future build breaks the
   same way, check which Plume checkout is at `../plume` first.
 
-**Not verified here, and not something this sandbox is set up to verify:**
-`ps3recomp_plume_smoke` actually presenting a visible frame end-to-end on
-real hardware. That is the repo owner's to confirm.
+**Confirmed on the repo owner's own hardware** (AMD/RADV, Wayland): after
+fixing the semaphore bug below, `ps3recomp_plume_smoke` presents 180 real
+frames end-to-end with no hang -- Phase 1 (real window, real Plume Vulkan
+device/queue/swapchain, real color-target clear+present) is verified
+working, not just building.
+
+One bug found and fixed this way: `Present()` built a per-frame swapchain
+release semaphore and told `swap_chain_->present()` to wait on it, but the
+preceding `executeCommandLists()` submit signaled nothing -- so `present()`
+waited forever on a semaphore nothing was ever going to signal. A gdb
+backtrace on the repo owner's machine (main thread stuck in
+`plume::VulkanSwapChain::present()`'s DRM syncobj wait) pinned this down
+immediately; guessing from this sandbox alone would not have found it, since
+lavapipe's software presentation path didn't reproduce the hang. Fixed by
+having the submit signal that semaphore (and wait on the acquire semaphore,
+which also wasn't being waited on before the GPU work touched the acquired
+image).
 
 ## Next steps (Phase 2)
 
-1. Confirm on real hardware that `ps3recomp_plume_smoke` presents a visible,
-   correctly-colored frame end to end (build was verified in this repo's
-   sandbox; running it was not, see above). If it doesn't, start by running
-   under `VK_LOADER_DEBUG=all` and testing `Init`/`ColorTargetCreate`/
-   `Present` in isolation.
+1. ~~Confirm on real hardware that `ps3recomp_plume_smoke` presents a
+   visible, correctly-colored frame end to end~~ -- done, see above.
 1b. Give `ps3recomp_rsx_plume` the same plugin split Xerenge's `rexgpu-plume`
    has (a separate shared library, loaded at runtime rather than statically
    linked) so a game can use it alongside `ps3recomp_runtime`'s own SDL2
