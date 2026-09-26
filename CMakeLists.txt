@@ -277,32 +277,32 @@ if(PS3RECOMP_RSX_BACKEND_PLUME AND NOT APPLE)
     set(PLUME_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../plume")
     find_package(SDL2 QUIET)
     if(EXISTS "${PLUME_ROOT}/CMakeLists.txt" AND (SDL2_FOUND OR TARGET SDL2::SDL2))
-        # Some distros' SDL2 CMake package reports an
-        # INTERFACE_INCLUDE_DIRECTORIES that also exposes an installed SDL3's
-        # headers -- notably Arch's sdl2-compat, which implements the SDL2
-        # ABI on top of SDL3 and (on at least some installs) leaks SDL3's
-        # include dir onto the SDL2::SDL2 target. Plume's own headers do a
-        # bare #include <SDL_vulkan.h>/<SDL.h>, so if both are reachable in
-        # the same translation unit the compiler can resolve either one to
-        # SDL3's copy instead of SDL2's -- SDL_bool, SDL_ScaleMode and
-        # SDL_CreateWindow's argument count all differ between the two, so
-        # the result is a wall of redefinition errors, not a clean failure.
-        # Pin the include dir to SDL2's own directory explicitly instead of
-        # trusting the imported target's reported path.
-        if(TARGET SDL2::SDL2)
-            find_path(PS3RECOMP_SDL2_STRICT_INCLUDE_DIR NAMES SDL_vulkan.h
-                PATH_SUFFIXES SDL2
-                PATHS /usr/include /usr/local/include /opt/homebrew/include)
-            if(PS3RECOMP_SDL2_STRICT_INCLUDE_DIR)
-                set_target_properties(SDL2::SDL2 PROPERTIES
-                    INTERFACE_INCLUDE_DIRECTORIES "${PS3RECOMP_SDL2_STRICT_INCLUDE_DIR}")
-                message(STATUS "  SDL2:         pinned include dir to ${PS3RECOMP_SDL2_STRICT_INCLUDE_DIR} (avoids SDL3 header collisions)")
-            endif()
-        endif()
+        # Some distros resolve Plume's bare #include <SDL_vulkan.h>/<SDL.h>
+        # to an installed SDL3's copy instead of SDL2's -- notably Arch,
+        # where sdl2-compat (the SDL2 ABI implemented on top of SDL3)
+        # coexists with a separately installed sdl3 package, and whatever
+        # path Plume's own CMakeLists resolves SDL2's include dir through
+        # (its SDL2::SDL2 target property, or a pkg-config fallback) ends up
+        # searching SDL3's directory first. SDL_bool, SDL_ScaleMode and
+        # SDL_CreateWindow's argument count all differ between the two
+        # majors, so the result is a wall of redefinition errors, not a
+        # clean failure. Overriding SDL2::SDL2's own property is not enough
+        # if Plume did not resolve its include dir through that target in
+        # the first place, so this instead force-prepends (BEFORE) the real
+        # SDL2 directory onto the `plume` target itself once it exists,
+        # which wins the search order regardless of how Plume found SDL2.
+        find_path(PS3RECOMP_SDL2_STRICT_INCLUDE_DIR NAMES SDL_vulkan.h
+            PATH_SUFFIXES SDL2
+            PATHS /usr/include /usr/local/include /opt/homebrew/include)
 
         set(PLUME_SDL_VULKAN_ENABLED ON CACHE BOOL "" FORCE)
         set(PLUME_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
         add_subdirectory("${PLUME_ROOT}" "${CMAKE_CURRENT_BINARY_DIR}/plume")
+
+        if(PS3RECOMP_SDL2_STRICT_INCLUDE_DIR AND TARGET plume)
+            target_include_directories(plume BEFORE PUBLIC "${PS3RECOMP_SDL2_STRICT_INCLUDE_DIR}")
+            message(STATUS "  SDL2:         pinned plume's include search order to ${PS3RECOMP_SDL2_STRICT_INCLUDE_DIR} first (avoids SDL3 header collisions)")
+        endif()
 
         add_library(ps3recomp_rsx_plume STATIC
             "${CMAKE_CURRENT_SOURCE_DIR}/libs/video/plume_renderer/rsx_draw_backend_plume.cpp"
@@ -318,6 +318,13 @@ if(PS3RECOMP_RSX_BACKEND_PLUME AND NOT APPLE)
         else()
             target_include_directories(ps3recomp_rsx_plume PUBLIC ${SDL2_INCLUDE_DIRS})
             target_link_libraries(ps3recomp_rsx_plume PUBLIC ${SDL2_LIBRARIES})
+        endif()
+        if(PS3RECOMP_SDL2_STRICT_INCLUDE_DIR)
+            # Same reasoning as the `plume` target above: this file's own
+            # #include <SDL.h> resolves fine on its own, but linking `plume`
+            # PUBLIC can still pull in whatever (possibly SDL3-first) search
+            # order Plume resolved internally, so pin it here too.
+            target_include_directories(ps3recomp_rsx_plume BEFORE PUBLIC "${PS3RECOMP_SDL2_STRICT_INCLUDE_DIR}")
         endif()
         target_link_libraries(ps3recomp_runtime PUBLIC ps3recomp_rsx_plume)
         message(STATUS "  RSX backend:  Plume/Vulkan enabled (${PLUME_ROOT})")
