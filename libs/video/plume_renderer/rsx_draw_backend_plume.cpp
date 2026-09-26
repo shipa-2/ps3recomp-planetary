@@ -22,6 +22,7 @@
  * not something fixable by include order.
  */
 #include "rsx_draw_backend_plume.h"
+#include "rsx_shader_spirv.h"
 
 #include <plume_render_interface.h>
 
@@ -69,6 +70,94 @@ RenderFormat ToPlumeFormat(rsx_be_format fmt)
     }
 }
 
+/* rsx_be_render_state's fields carry the guest's own NV4097 register values
+ * undecoded (see rsx_draw_engine.h's comment on rsx_be_render_state: "the
+ * D3D12 enums left undecoded... each backend has its own table"). Those
+ * values are GL-compatible enums, as rsx_d3d12_backend.c's own blend-factor
+ * table documents ("RSX blend factors/equation carry GL enums") and its
+ * rsx_cull_key function's CULL_FACE/FRONT_FACE constants confirm (0x0404
+ * FRONT, 0x0405 BACK, 0x0408 FRONT_AND_BACK, 0x0900 CW, 0x0901 CCW). The
+ * comparison-function and stencil-op tables below are the parallel
+ * GL_NEVER..GL_ALWAYS (0x0200-0x0207) and GL_ZERO/GL_KEEP.. (0x1E00 range,
+ * plus GL_INVERT 0x150A and the _WRAP variants 0x8507/0x8508) constants from
+ * the same NV40-derived, OpenGL-register-compatible hardware family -- kept
+ * here rather than re-deriving them, and cross-checked against the blend
+ * table's already-verified magic numbers for the same guest fields.
+ */
+
+RenderComparisonFunction GlCompareToPlume(u32 f)
+{
+    switch (f) {
+        case 0x0200: return RenderComparisonFunction::NEVER;
+        case 0x0201: return RenderComparisonFunction::LESS;
+        case 0x0202: return RenderComparisonFunction::EQUAL;
+        case 0x0203: return RenderComparisonFunction::LESS_EQUAL;
+        case 0x0204: return RenderComparisonFunction::GREATER;
+        case 0x0205: return RenderComparisonFunction::NOT_EQUAL;
+        case 0x0206: return RenderComparisonFunction::GREATER_EQUAL;
+        case 0x0207: return RenderComparisonFunction::ALWAYS;
+        default:     return RenderComparisonFunction::ALWAYS;
+    }
+}
+
+RenderStencilOp GlStencilOpToPlume(u32 op)
+{
+    switch (op) {
+        case 0x0000: return RenderStencilOp::ZERO;
+        case 0x1E00: return RenderStencilOp::KEEP;
+        case 0x1E01: return RenderStencilOp::REPLACE;
+        case 0x1E02: return RenderStencilOp::INCREMENT_AND_CLAMP;
+        case 0x1E03: return RenderStencilOp::DECREMENT_AND_CLAMP;
+        case 0x150A: return RenderStencilOp::INVERT;
+        case 0x8507: return RenderStencilOp::INCREMENT_AND_WRAP;
+        case 0x8508: return RenderStencilOp::DECREMENT_AND_WRAP;
+        default:     return RenderStencilOp::KEEP;
+    }
+}
+
+/* Same table as rsx_d3d12_backend.c's gl_blend_factor_d3d/gl_blend_op_d3d,
+ * retargeted to Plume's enum names -- see the comment above this block. */
+RenderBlend GlBlendFactorToPlume(u32 f, bool is_alpha)
+{
+    switch (f & 0xFFFFu) {
+        case 0x0000: return RenderBlend::ZERO;
+        case 0x0001: return RenderBlend::ONE;
+        case 0x0300: return is_alpha ? RenderBlend::SRC_ALPHA     : RenderBlend::SRC_COLOR;
+        case 0x0301: return is_alpha ? RenderBlend::INV_SRC_ALPHA : RenderBlend::INV_SRC_COLOR;
+        case 0x0302: return RenderBlend::SRC_ALPHA;
+        case 0x0303: return RenderBlend::INV_SRC_ALPHA;
+        case 0x0304: return RenderBlend::DEST_ALPHA;
+        case 0x0305: return RenderBlend::INV_DEST_ALPHA;
+        case 0x0306: return is_alpha ? RenderBlend::DEST_ALPHA     : RenderBlend::DEST_COLOR;
+        case 0x0307: return is_alpha ? RenderBlend::INV_DEST_ALPHA : RenderBlend::INV_DEST_COLOR;
+        case 0x0308: return RenderBlend::SRC_ALPHA_SAT;
+        case 0x8001: return RenderBlend::BLEND_FACTOR;
+        case 0x8002: return RenderBlend::INV_BLEND_FACTOR;
+        case 0x8003: return RenderBlend::BLEND_FACTOR;
+        case 0x8004: return RenderBlend::INV_BLEND_FACTOR;
+        default:     return RenderBlend::ONE;
+    }
+}
+
+RenderBlendOperation GlBlendOpToPlume(u32 e)
+{
+    switch (e & 0xFFFFu) {
+        case 0x8007: return RenderBlendOperation::MIN;
+        case 0x8008: return RenderBlendOperation::MAX;
+        case 0x800A: return RenderBlendOperation::SUBTRACT;
+        case 0x800B: return RenderBlendOperation::REV_SUBTRACT;
+        default:     return RenderBlendOperation::ADD;   /* 0x8006 FUNC_ADD / unset */
+    }
+}
+
+/* register(bN) -> constant buffer binding N, register(tN)/(sN) -> texture/
+ * sampler binding N: the same contract rsx_shader_msl.h documents for the
+ * MSL side (same glslang HLSL front end, same auto-mapped bindings). Fixed
+ * regardless of any one pipeline's actual shader content, so one pipeline
+ * layout is created once and reused for every pipeline. */
+constexpr uint32_t kVsConstantsBinding = 0;
+constexpr uint32_t kPsConstantsBinding = 1;
+
 struct Surface {
     std::unique_ptr<RenderTexture> texture;
     std::unique_ptr<RenderFramebuffer> framebuffer;
@@ -96,6 +185,12 @@ public:
     void Readback(uint32_t surface, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                   void* out, uint32_t out_pitch);
 
+    uint32_t PipelineCreate(const char* vs_hlsl, const char* ps_hlsl,
+                            const rsx_be_render_state* rs,
+                            const rsx_vertex_layout_plan* layout,
+                            uint32_t vertex_stride, rsx_be_format rt_fmt, uint32_t rt_count);
+    void PipelineRelease(uint32_t pipeline);
+
     int PumpEvents();
 
     SDL_Window* window() const { return window_; }
@@ -105,6 +200,8 @@ private:
     void EnsureListClosedAndSubmitted(RenderCommandSemaphore* wait_sem = nullptr,
                                       RenderCommandSemaphore* signal_sem = nullptr);
     Surface* FindSurface(uint32_t id);
+    bool EnsurePipelineLayout();
+    bool CompileHlslToSpirv(const char* hlsl, int stage, std::vector<uint32_t>& out_words);
 
     SDL_Window* window_ = nullptr;
     std::unique_ptr<RenderInterface> interface_;
@@ -118,6 +215,15 @@ private:
 
     std::unordered_map<uint32_t, Surface> surfaces_;
     uint32_t next_surface_id_ = 1;
+
+    struct Pipeline {
+        std::unique_ptr<RenderShader> vertex_shader;
+        std::unique_ptr<RenderShader> pixel_shader;
+        std::unique_ptr<RenderPipeline> pipeline;
+    };
+    std::unique_ptr<RenderPipelineLayout> pipeline_layout_;
+    std::unordered_map<uint32_t, Pipeline> pipelines_;
+    uint32_t next_pipeline_id_ = 1;
 
     bool list_open_ = false;
     uint32_t width_ = 0;
@@ -278,6 +384,168 @@ void PlumeRsxBackend::ColorTargetRelease(uint32_t surface)
     surfaces_.erase(surface);
 }
 
+bool PlumeRsxBackend::EnsurePipelineLayout()
+{
+    if (pipeline_layout_) return true;
+
+    /* Set 0: the two constant buffers every RSX vertex/fragment program
+     * pair uses (rsx_shader_msl.h's register(b0)/register(b1)). */
+    const RenderDescriptorRange set0_ranges[2] = {
+        RenderDescriptorRange(RenderDescriptorRangeType::CONSTANT_BUFFER, kVsConstantsBinding, 1),
+        RenderDescriptorRange(RenderDescriptorRangeType::CONSTANT_BUFFER, kPsConstantsBinding, 1),
+    };
+    /* Set 1: the 16 fragment texture/sampler pairs (register(t0..15)/
+     * (s0..15)), samplers placed after the textures in the same set. */
+    const RenderDescriptorRange set1_ranges[2] = {
+        RenderDescriptorRange(RenderDescriptorRangeType::TEXTURE, 0, RSX_BE_MAX_TEXTURES),
+        RenderDescriptorRange(RenderDescriptorRangeType::SAMPLER, RSX_BE_MAX_TEXTURES, RSX_BE_MAX_TEXTURES),
+    };
+    /* Set 2: the (much rarer) vertex texture/sampler pairs. */
+    const RenderDescriptorRange set2_ranges[2] = {
+        RenderDescriptorRange(RenderDescriptorRangeType::TEXTURE, 0, RSX_BE_MAX_VERTEX_TEXTURES),
+        RenderDescriptorRange(RenderDescriptorRangeType::SAMPLER, RSX_BE_MAX_VERTEX_TEXTURES, RSX_BE_MAX_VERTEX_TEXTURES),
+    };
+    const RenderDescriptorSetDesc set_descs[3] = {
+        RenderDescriptorSetDesc(set0_ranges, 2),
+        RenderDescriptorSetDesc(set1_ranges, 2),
+        RenderDescriptorSetDesc(set2_ranges, 2),
+    };
+
+    RenderPipelineLayoutDesc layout_desc(nullptr, 0, set_descs, 3,
+                                         /*isLocal=*/false, /*allowInputLayout=*/true);
+    pipeline_layout_ = device_->createPipelineLayout(layout_desc);
+    if (!pipeline_layout_) {
+        std::fprintf(stderr, "[plume backend] createPipelineLayout failed\n");
+    }
+    return pipeline_layout_ != nullptr;
+}
+
+bool PlumeRsxBackend::CompileHlslToSpirv(const char* hlsl, int stage, std::vector<uint32_t>& out_words)
+{
+    /* RSX vertex/fragment programs are small (a handful of instructions to
+     * a few hundred); 256K words is far more headroom than any real
+     * decompiler output needs. */
+    out_words.resize(65536);
+    uint32_t word_count = 0;
+    char log[512] = {};
+    if (rsx_hlsl_to_spirv(hlsl, stage, out_words.data(), (uint32_t)out_words.size(), &word_count,
+                         log, (uint32_t)sizeof(log)) != 0) {
+        std::fprintf(stderr, "[plume backend] rsx_hlsl_to_spirv (stage %d) failed: %s\n", stage, log);
+        return false;
+    }
+    out_words.resize(word_count);
+    return true;
+}
+
+uint32_t PlumeRsxBackend::PipelineCreate(const char* vs_hlsl, const char* ps_hlsl,
+                                         const rsx_be_render_state* rs,
+                                         const rsx_vertex_layout_plan* layout,
+                                         uint32_t vertex_stride, rsx_be_format rt_fmt, uint32_t rt_count)
+{
+    if (!vs_hlsl || !ps_hlsl || !rs || !layout) return 0;
+    if (!EnsurePipelineLayout()) return 0;
+
+    std::vector<uint32_t> vs_spirv, ps_spirv;
+    if (!CompileHlslToSpirv(vs_hlsl, RSX_SHADER_STAGE_VERTEX, vs_spirv)) return 0;
+    if (!CompileHlslToSpirv(ps_hlsl, RSX_SHADER_STAGE_FRAGMENT, ps_spirv)) return 0;
+
+    Pipeline entry;
+    entry.vertex_shader = device_->createShader(vs_spirv.data(), vs_spirv.size() * sizeof(uint32_t),
+                                                "main", RenderShaderFormat::SPIRV);
+    entry.pixel_shader = device_->createShader(ps_spirv.data(), ps_spirv.size() * sizeof(uint32_t),
+                                               "main", RenderShaderFormat::SPIRV);
+    if (!entry.vertex_shader || !entry.pixel_shader) {
+        std::fprintf(stderr, "[plume backend] createShader failed\n");
+        return 0;
+    }
+
+    /* rsx_vertex_compact.c ("each selected register remains a float4")
+     * guarantees the vertex data draw() will hand this pipeline is already
+     * expanded to one float4 per active attribute, tightly packed in
+     * `layout->attrs` order -- so the input layout is always vec4-per-
+     * attribute at consecutive 16-byte offsets, never the attribute's
+     * original RSX wire format. `location` follows the same declaration
+     * order glslang's mapIO assigned when rsx_hlsl_to_spirv compiled the
+     * decompiler's ATTRn-named inputs (see rsx_shader_msl.h's binding
+     * contract, which the SPIR-V path shares). */
+    std::vector<RenderInputElement> input_elements;
+    input_elements.reserve(layout->count);
+    for (uint32_t i = 0; i < layout->count; ++i) {
+        input_elements.emplace_back("ATTR", layout->attrs[i], /*location=*/i,
+                                    RenderFormat::R32G32B32A32_FLOAT,
+                                    /*slotIndex=*/0, /*alignedByteOffset=*/i * 16u);
+    }
+    const RenderInputSlot input_slot(0, vertex_stride, RenderInputSlotClassification::PER_VERTEX_DATA);
+
+    RenderGraphicsPipelineDesc desc;
+    desc.pipelineLayout = pipeline_layout_.get();
+    desc.vertexShader = entry.vertex_shader.get();
+    desc.pixelShader = entry.pixel_shader.get();
+    desc.inputSlots = &input_slot;
+    desc.inputSlotsCount = 1;
+    desc.inputElements = input_elements.data();
+    desc.inputElementsCount = (uint32_t)input_elements.size();
+
+    /* TODO(Phase 3, draw()): the engine's draw() call carries the topology
+     * for that specific draw, but pipeline_create()'s own parameters don't
+     * -- there is no per-topology cache key to build multiple pipeline
+     * variants from yet. Default to the overwhelmingly common case; revisit
+     * once draw() actually issues anything and a title exercises points/
+     * lines/strips against a pipeline built here. */
+    desc.primitiveTopology = RenderPrimitiveTopology::TRIANGLE_LIST;
+
+    desc.cullMode = rs->cull_enable
+        ? ((rs->cull_face == 0x0404u || rs->cull_face == 0x0408u) ? RenderCullMode::FRONT : RenderCullMode::BACK)
+        : RenderCullMode::NONE;
+    desc.frontFace = (rs->front_face == 0x0901u) ? RenderFrontFace::COUNTER_CLOCKWISE : RenderFrontFace::CLOCKWISE;
+
+    /* TODO(Phase 2, depth_target_create): depth/stencil testing is left
+     * disabled regardless of `rs` until there is a real depth RenderTexture
+     * to attach a format from -- depth_target_create() is still a stub (see
+     * TrampDepthTargetCreate), so a pipeline with depthEnabled=true here
+     * would have no depthTargetFormat to build against. */
+    desc.depthEnabled = false;
+    desc.stencilEnabled = false;
+
+    RenderBlendDesc blend;
+    if (rs->blend_enable) {
+        blend.blendEnabled = true;
+        blend.srcBlend = GlBlendFactorToPlume(rs->sf_rgb, false);
+        blend.dstBlend = GlBlendFactorToPlume(rs->df_rgb, false);
+        blend.blendOp = GlBlendOpToPlume(rs->eq_rgb);
+        blend.srcBlendAlpha = GlBlendFactorToPlume(rs->sf_a, true);
+        blend.dstBlendAlpha = GlBlendFactorToPlume(rs->df_a, true);
+        blend.blendOpAlpha = GlBlendOpToPlume(rs->eq_a);
+    }
+    /* TODO: rs->color_mask's guest bit layout (which of ARGB maps to which
+     * bit) isn't confirmed against this backend yet -- leaving every
+     * channel writable is the safe default until it is, rather than risk a
+     * silently wrong channel mask. */
+
+    const RenderFormat color_format = ToPlumeFormat(rt_fmt);
+    const uint32_t clamped_rt_count = rt_count ? rt_count : 1;
+    for (uint32_t i = 0; i < clamped_rt_count && i < RenderGraphicsPipelineDesc::MaxRenderTargets; ++i) {
+        desc.renderTargetBlend[i] = blend;
+        desc.renderTargetFormat[i] = color_format;
+    }
+    desc.renderTargetCount = clamped_rt_count;
+
+    entry.pipeline = device_->createGraphicsPipeline(desc);
+    if (!entry.pipeline) {
+        std::fprintf(stderr, "[plume backend] createGraphicsPipeline failed\n");
+        return 0;
+    }
+
+    const uint32_t id = next_pipeline_id_++;
+    pipelines_.emplace(id, std::move(entry));
+    return id;
+}
+
+void PlumeRsxBackend::PipelineRelease(uint32_t pipeline)
+{
+    pipelines_.erase(pipeline);
+}
+
 void PlumeRsxBackend::ClearColor(uint32_t surface, const float rgba[4])
 {
     Surface* s = FindSurface(surface);
@@ -407,20 +675,18 @@ uint32_t TrampDepthTargetCreate(void*, uint32_t, uint32_t) { return 0; }
 void TrampDepthTargetRelease(void*, uint32_t) {}
 uint32_t TrampDepthSnapshot(void*, uint32_t, uint32_t, uint32_t) { return 0; }
 
-uint32_t TrampPipelineCreate(void*, const char*, const char*, const rsx_be_render_state*,
-                             const rsx_vertex_layout_plan*, uint32_t, rsx_be_format, uint32_t)
+uint32_t TrampPipelineCreate(void* user, const char* vs_hlsl, const char* ps_hlsl,
+                             const rsx_be_render_state* rs, const rsx_vertex_layout_plan* layout,
+                             uint32_t vertex_stride, rsx_be_format rt_fmt, uint32_t rt_count)
 {
-    /* TODO(Phase 2): rsx_hlsl_to_spirv() both stages, device_->createShader
-     * with RenderShaderFormat::SPIRV, build a RenderGraphicsPipelineDesc from
-     * `rs` + `layout` (see the triangle example for the shape) and call
-     * createGraphicsPipeline. Everything the engine needs from Plume for
-     * this already works (validated: HLSL -> SPIR-V -> Plume renders a real
-     * frame through lavapipe/Xvfb in this same environment); what is left is
-     * translating rsx_be_render_state/rsx_vertex_layout_plan's fields into
-     * Plume's blend/depth/input-layout descriptors. */
-    return 0;
+    return static_cast<PlumeRsxBackend*>(user)->PipelineCreate(vs_hlsl, ps_hlsl, rs, layout,
+                                                               vertex_stride, rt_fmt, rt_count);
 }
-void TrampPipelineRelease(void*, uint32_t) {}
+
+void TrampPipelineRelease(void* user, uint32_t pipeline)
+{
+    static_cast<PlumeRsxBackend*>(user)->PipelineRelease(pipeline);
+}
 
 void TrampBindTargets(void*, const uint32_t*, uint32_t, uint32_t) {}
 void TrampBindPipeline(void*, uint32_t) {}
@@ -434,9 +700,10 @@ void TrampSetStencilRef(void*, uint32_t) {}
 
 void TrampDraw(void*, rsx_topology, const void*, uint32_t, uint32_t, const uint32_t*, uint32_t)
 {
-    /* Phase 1 has no pipeline path (see TrampPipelineCreate), so every draw
-     * is a no-op: the frame still clears and presents correctly, it is just
-     * empty of guest geometry until Phase 2 lands. */
+    /* Pipelines can now be built (see TrampPipelineCreate), but nothing
+     * binds one or issues a draw yet -- draw() itself is still a no-op:
+     * the frame still clears and presents correctly, it is just empty of
+     * guest geometry until bind_pipeline/bind_* and this are wired up. */
 }
 
 void TrampClearColor(void* user, uint32_t surface, const float rgba[4])

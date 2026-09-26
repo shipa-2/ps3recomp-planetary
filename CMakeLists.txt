@@ -314,6 +314,11 @@ if(PS3RECOMP_RSX_BACKEND_PLUME AND NOT APPLE)
 
         add_library(ps3recomp_rsx_plume STATIC
             "${CMAKE_CURRENT_SOURCE_DIR}/libs/video/plume_renderer/rsx_draw_backend_plume.cpp"
+            # rsx_shader_spirv.cpp needs only glslang, not SDL, so it's cheap
+            # to compile a second time here rather than trying to share the
+            # one already built into ps3recomp_runtime -- which this target
+            # deliberately does NOT link against (see the NOTE above).
+            "${CMAKE_CURRENT_SOURCE_DIR}/libs/video/rsx_shader_spirv.cpp"
         )
         target_include_directories(ps3recomp_rsx_plume PUBLIC
             "${CMAKE_CURRENT_SOURCE_DIR}/libs/video"
@@ -323,6 +328,12 @@ if(PS3RECOMP_RSX_BACKEND_PLUME AND NOT APPLE)
         # SDL3's own include dirs/libs come in transitively: `plume` links
         # its SDL3 target PUBLIC.
         target_link_libraries(ps3recomp_rsx_plume PUBLIC plume)
+        if(TARGET ps3recomp_spirv_translation)
+            target_link_libraries(ps3recomp_rsx_plume PRIVATE ps3recomp_spirv_translation)
+        else()
+            message(WARNING "  RSX backend:  glslang not found -- ps3recomp_rsx_plume's "
+                            "pipeline_create() will always fail (rsx_hlsl_to_spirv stubbed out)")
+        endif()
         message(STATUS "  RSX backend:  Plume/Vulkan enabled as its own target, ps3recomp_rsx_plume (${PLUME_ROOT}) -- NOT linked into ps3recomp_runtime, see the NOTE above")
 
         # Phase 1 smoke test: real window + device + swapchain + clear +

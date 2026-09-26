@@ -7,13 +7,15 @@
  * Linux (and, later, wherever else Plume's Vulkan/Metal/D3D12 backends
  * reach) instead of a third hand-written platform backend.
  *
- * Phase 1 scope (see the .cpp for the exact split): a real SDL2 window, a
+ * Phase 1 scope (see the .cpp for the exact split): a real SDL window, a
  * real Plume device/swapchain, and real color targets/clears/present.
- * Textures, depth and pipelines are not yet implemented -- draw() takes the
- * "no textures, no depth" fallback: a title's own vertex/fragment programs
- * are not run yet, and every draw call is dropped rather than mis-rendered.
- * That grows in the next phase once rsx_hlsl_to_spirv (rsx_shader_spirv.h)
- * is wired to pipeline_create.
+ * pipeline_create() now compiles the decompilers' HLSL to SPIR-V (via
+ * rsx_shader_spirv.h) and builds a real Plume graphics pipeline from it,
+ * with blend/cull/front-face wired from the guest's own render state.
+ * Textures, depth/stencil and draw() itself are not implemented yet:
+ * nothing binds a pipeline or issues a draw call, so every draw remains a
+ * no-op (dropped rather than mis-rendered) until bind_pipeline, the other
+ * bind_ calls, and draw() are wired up next.
  */
 #ifndef PS3RECOMP_RSX_DRAW_BACKEND_PLUME_H
 #define PS3RECOMP_RSX_DRAW_BACKEND_PLUME_H
