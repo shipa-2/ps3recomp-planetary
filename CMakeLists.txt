@@ -277,6 +277,29 @@ if(PS3RECOMP_RSX_BACKEND_PLUME AND NOT APPLE)
     set(PLUME_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../plume")
     find_package(SDL2 QUIET)
     if(EXISTS "${PLUME_ROOT}/CMakeLists.txt" AND (SDL2_FOUND OR TARGET SDL2::SDL2))
+        # Some distros' SDL2 CMake package reports an
+        # INTERFACE_INCLUDE_DIRECTORIES that also exposes an installed SDL3's
+        # headers -- notably Arch's sdl2-compat, which implements the SDL2
+        # ABI on top of SDL3 and (on at least some installs) leaks SDL3's
+        # include dir onto the SDL2::SDL2 target. Plume's own headers do a
+        # bare #include <SDL_vulkan.h>/<SDL.h>, so if both are reachable in
+        # the same translation unit the compiler can resolve either one to
+        # SDL3's copy instead of SDL2's -- SDL_bool, SDL_ScaleMode and
+        # SDL_CreateWindow's argument count all differ between the two, so
+        # the result is a wall of redefinition errors, not a clean failure.
+        # Pin the include dir to SDL2's own directory explicitly instead of
+        # trusting the imported target's reported path.
+        if(TARGET SDL2::SDL2)
+            find_path(PS3RECOMP_SDL2_STRICT_INCLUDE_DIR NAMES SDL_vulkan.h
+                PATH_SUFFIXES SDL2
+                PATHS /usr/include /usr/local/include /opt/homebrew/include)
+            if(PS3RECOMP_SDL2_STRICT_INCLUDE_DIR)
+                set_target_properties(SDL2::SDL2 PROPERTIES
+                    INTERFACE_INCLUDE_DIRECTORIES "${PS3RECOMP_SDL2_STRICT_INCLUDE_DIR}")
+                message(STATUS "  SDL2:         pinned include dir to ${PS3RECOMP_SDL2_STRICT_INCLUDE_DIR} (avoids SDL3 header collisions)")
+            endif()
+        endif()
+
         set(PLUME_SDL_VULKAN_ENABLED ON CACHE BOOL "" FORCE)
         set(PLUME_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
         add_subdirectory("${PLUME_ROOT}" "${CMAKE_CURRENT_BINARY_DIR}/plume")
