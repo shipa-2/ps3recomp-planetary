@@ -80,6 +80,15 @@ Real and working:
   current whole-texture `copyTexture`.
 - `rsx_shader_spirv.{h,cpp}`: real, and validated independently of the
   backend -- see "What was actually verified" below.
+- `pipeline_create`/`pipeline_release`: real -- compiles both stages'
+  HLSL to SPIR-V, creates the shaders, and builds a real
+  `plume::RenderGraphicsPipeline` with a shared pipeline layout (constant
+  buffers + fragment and vertex texture/sampler sets, matching
+  `rsx_shader_msl.h`'s binding contract), a vec4-per-attribute input
+  layout, and blend/cull/front-face translated from the guest's own
+  NV4097 state. Depth/stencil and the exact `color_mask` bit layout are
+  deliberately left unwired (see the TODOs in the .cpp); no pipeline is
+  ever bound or drawn with yet.
 - CMake: builds whenever a Plume checkout exists at `../plume` next to this
   repository (same sibling-directory convention as Xerenge's own
   `rexgpu-plume`), gated by `PS3RECOMP_RSX_BACKEND_PLUME` (default ON,
@@ -89,10 +98,10 @@ Explicit stubs (return "not built" / no-op, matching the engine's contract
 that a 0 handle means "could not build" and is safely cached):
 - `texture_create`/`texture_upload`/`texture_release`
 - `depth_target_create`/`depth_target_release`/`depth_snapshot`
-- `pipeline_create`/`pipeline_release`
 - every `bind_*`, `set_viewport`, `set_scissor`, `set_stencil_ref`
 - `draw` (a no-op: frames clear and present correctly, but carry no guest
-  geometry yet)
+  geometry yet -- there is a real pipeline to bind now, but nothing binds
+  or draws with one)
 - `readback`
 
 This means: real window, real Vulkan device, real per-frame clear+present
@@ -148,12 +157,9 @@ image).
    usage (cellPad/cellAudio) in one process -- right now they cannot coexist
    in the same statically-linked binary (see "Which Plume checkout this
    needs" above).
-2. `pipeline_create`: call `rsx_hlsl_to_spirv()` for both stages, then
-   `device_->createShader(..., RenderShaderFormat::SPIRV)`, and build a
-   `RenderGraphicsPipelineDesc` from `rsx_be_render_state` +
-   `rsx_vertex_layout_plan` (blend/depth/cull descriptors, input layout).
-   `examples/triangle/main.cpp` in the Plume checkout shows the exact shape
-   of every call needed.
+2. ~~`pipeline_create`: compile HLSL to SPIR-V, build a real
+   `RenderGraphicsPipelineDesc`~~ -- done, see above (topology, depth/
+   stencil and `color_mask` still deferred within it, see its TODOs).
 3. `draw`: wire vertex/index data through to `setVertexBuffers` +
    `drawInstanced`/`drawIndexedInstanced`.
 4. `texture_create`/`texture_upload`: real `RenderTexture` + staging-buffer
