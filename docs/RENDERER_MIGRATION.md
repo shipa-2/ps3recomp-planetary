@@ -25,6 +25,32 @@ where the design below (offscreen color target + copy-to-swapchain-at-present,
 SDL2 windowing, HLSL -> SPIR-V via glslang feeding `createShader` directly)
 is carried over from.
 
+## Which Plume checkout this needs
+
+`PLUME_ROOT` (`../plume` next to this repo) must be
+[`shipa-2/plume`](https://github.com/shipa-2/plume), not upstream
+[`renderbag/plume`](https://github.com/renderbag/plume): the fork links SDL3
+unconditionally (`find_package(SDL3 REQUIRED)`, no SDL2 fallback), and
+`rsx_draw_backend_plume.cpp` is written against the SDL3 API to match.
+Mixing SDL2 and SDL3 headers in one translation unit is an ODR pileup
+(`SDL_bool`, `SDL_ScaleMode`, `SDL_CreateWindow`'s own argument count all
+differ) that no include-path trick fixes -- if you see a wall of `SDL_bool`/
+`SDL_ScaleMode` redefinition errors, you have the wrong Plume checkout, not
+a build environment problem.
+
+Separately, and for a different reason: `ps3recomp_rsx_plume` is **not**
+linked into `ps3recomp_runtime`, and cannot be until it becomes a plugin.
+`ps3recomp_runtime` links `SDL2::SDL2` itself (cellPad/cellAudio), and
+CMake's own `SDL2::SDL2` imported target carries a
+`COMPATIBLE_INTERFACE_STRING SDL_VERSION` property -- having both that and
+an SDL3 target as transitive dependencies of the same final target is a
+hard CMake generate-time error, not a linker warning. This is exactly why
+Xerenge's own Plume backend (`rexgpu-plume`) is a separate *shared* library
+loaded as a plugin rather than statically linked into the host executable.
+Until this backend gets the same treatment, a project that wants both
+cellPad/cellAudio and this Vulkan backend in one process needs that split
+first -- see "Next steps" below.
+
 ## What Plume does and does not solve
 
 Plume abstracts *device/resource/command* differences between Vulkan, D3D12
@@ -76,36 +102,41 @@ Xerenge's own Plume backend started from (see its `plume_swapchain.h`:
 
 ## What was actually verified in this environment
 
-This container has no GPU but does have Mesa's software Vulkan driver
-(lavapipe) and Xvfb, which is enough to validate the toolchain without real
-hardware:
+This sandbox has no GPU and no real display, but does have Mesa's software
+Vulkan driver (lavapipe) and Xvfb -- and, per the repo owner, is not where
+graphical tests actually get run (that happens on their own machine with
+real hardware). So verification here is deliberately scoped to *builds*,
+not to running/watching a frame get presented:
 
-- Plume's own `examples/triangle` was built and run under Xvfb + lavapipe:
-  a real Vulkan device was created, and over 2000 frames were rendered and
-  presented in a few seconds. This confirms Plume + SDL2 + Vulkan + lavapipe
-  works end-to-end in this kind of environment.
-- `ps3recomp_runtime` (the full static library, including
-  `rsx_shader_spirv.cpp` and `rsx_draw_backend_plume.cpp`) configures and
-  builds cleanly with `PS3RECOMP_RSX_BACKEND_PLUME` on.
-- The `ps3recomp_plume_smoke` executable (see
-  `libs/video/tests/test_plume_backend_smoke.c`) builds cleanly.
+- A real SDL3 (3.2.31, built from source with Vulkan enabled) and the
+  actual `shipa-2/plume` fork (not upstream) were used -- not a stand-in.
+- `rsx_shader_spirv.cpp`, the `plume` static library, `ps3recomp_rsx_plume`,
+  and `ps3recomp_plume_smoke` all configure and build cleanly against them,
+  with no ODR conflicts and no CMake generate-time errors.
+- Earlier attempts (see git history around commits 6f77d11, 7ec929d, and
+  the fix in 6364460) mis-cloned upstream `renderbag/plume` (SDL2) instead
+  of `shipa-2/plume` (SDL3) and chased what looked like an include-order bug
+  for two rounds before the real cause -- the wrong Plume checkout, plus a
+  real CMake linking constraint -- was found. If a future build breaks the
+  same way, check which Plume checkout is at `../plume` first.
 
-What was **not** confirmed in this environment: `ps3recomp_plume_smoke`
-actually presenting a visible frame end-to-end. It was left hanging with no
-output under Xvfb + lavapipe when this branch was prepared, and that was not
-root-caused before handing off -- it may be a real bug in
-`rsx_draw_backend_plume.cpp` (something in `Init`/`ColorTargetCreate`/
-`Present` blocking), or it may be an Xvfb/lavapipe environment quirk (the
-Plume triangle example was tested with its own single-shot run, not
-repeatedly in the same container session as the ps3recomp binary). **Treat
-Phase 1 as unverified end-to-end until it has been run on a real GPU/display
-and confirmed to present visible frames.**
+**Not verified here, and not something this sandbox is set up to verify:**
+`ps3recomp_plume_smoke` actually presenting a visible frame end-to-end on
+real hardware. That is the repo owner's to confirm.
 
 ## Next steps (Phase 2)
 
-1. Root-cause and fix whatever is blocking `ps3recomp_plume_smoke` (start by
-   running it under `vulkaninfo`/`VK_LOADER_DEBUG=all` and with a debugger
-   attached, or by testing `Init`/`ColorTargetCreate`/`Present` in isolation).
+1. Confirm on real hardware that `ps3recomp_plume_smoke` presents a visible,
+   correctly-colored frame end to end (build was verified in this repo's
+   sandbox; running it was not, see above). If it doesn't, start by running
+   under `VK_LOADER_DEBUG=all` and testing `Init`/`ColorTargetCreate`/
+   `Present` in isolation.
+1b. Give `ps3recomp_rsx_plume` the same plugin split Xerenge's `rexgpu-plume`
+   has (a separate shared library, loaded at runtime rather than statically
+   linked) so a game can use it alongside `ps3recomp_runtime`'s own SDL2
+   usage (cellPad/cellAudio) in one process -- right now they cannot coexist
+   in the same statically-linked binary (see "Which Plume checkout this
+   needs" above).
 2. `pipeline_create`: call `rsx_hlsl_to_spirv()` for both stages, then
    `device_->createShader(..., RenderShaderFormat::SPIRV)`, and build a
    `RenderGraphicsPipelineDesc` from `rsx_be_render_state` +
